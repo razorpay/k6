@@ -1,0 +1,279 @@
+# PMG self-test for the k6 repo.
+#
+# READ THIS BEFORE TRUSTING A GREEN CHECK:
+#
+#   PMG supports npm/pnpm/yarn/bun/pip/uv/poetry. k6 is a Go repo. Every real
+#   dependency fetch here (`go get`, `go install`, `go mod`) is INVISIBLE to
+#   PMG, and the one `pip3 install` lives inside packaging/Dockerfile, which
+#   runs in a Docker build the proxy cannot see into.
+#
+#   So this workflow does NOT prove k6's dependencies are screened. They are
+#   not. What it proves is narrower and still worth having:
+#
+#     guard-works     PMG still blocks a known-bad package when it CAN see one.
+#                     Catches silent breakage: a bad action release, rotated
+#                     credentials, a broken policy config.
+#     ci-still-works  PMG's presence does not break k6's real Go build or its
+#                     checksum-verified downloads. This is the failure mode
+#                     that actually threatens this repo.
+#     coverage-truth  Restates the gap above in the run summary so nobody
+#                     reads a green check as "dependencies screened".
+#
+#   The two placement-* jobs below run ONLY on manual dispatch. They answer a
+#   one-time question (should PMG start before or after actions/setup-go) and
+#   can be deleted once that is settled.
+#
+# The blocking test uses safedep-test-pkg, SafeDep's benign canary that is
+# flagged as malicious in their database for verification. No real malware is
+# ever fetched.
+name: PMG self-test
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly, Mondays 04:00 UTC. Drift detection, not per-PR gating.
+    - cron: '0 4 * * 1'
+  push:
+    # Re-verify whenever workflow wiring changes, since that is when the
+    # integration is most likely to get broken.
+    paths:
+      - '.github/workflows/**'
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # Same pinned uploader + digest as all.yml's test-current-cov job.
+  CODECOV_BASH_VERSION: 1.0.1
+  CODECOV_BASH_SHA512SUM: d075b412a362a9a2b7aedfec3b8b9a9a927b3b99e98c7c15a2b76ef09862aeb005e91d76a5fd71b511141496d0fd23d1b42095f722ebcd509d768fba030f159e
+
+jobs:
+  # ------------------------------------------------------------------
+  # Does PMG still block, given something it can actually see?
+  # ------------------------------------------------------------------
+  guard-works:
+    name: PMG blocks a known-bad package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # Toolchain first, so the Node download is not dragged through the proxy.
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Start PMG proxy
+        uses: safedep/pmg@5ac0f275b83d9d5a9342c6aae977ec32fa330daa # v1
+        with:
+          server-mode: true
+          api-key: ${{ secrets.PMG_PUBLIC_REPOS_TOKEN }}
+          tenant-id: ${{ secrets.PMG_TENANT_ID }}
+
+      - name: Attempt to install SafeDep's canary package (must be blocked)
+        run: |
+          mkdir -p /tmp/pmg-canary && cd /tmp/pmg-canary
+          npm init -y >/dev/null 2>&1
+
+          # Inverted assertion: a SUCCESSFUL install means the guard is dead.
+          if npm install --no-cache --prefer-online safedep-test-pkg@0.1.3; then
+            echo "::error title=PMG guard is not working::safedep-test-pkg installed successfully. PMG did not block a package flagged malicious in SafeDep's database. Treat PMG as non-functional across all repos until this is explained."
+            exit 1
+          fi
+          echo "PMG blocked safedep-test-pkg as expected."
+
+      # No --fail-on-violation here: a violation is the expected outcome above,
+      # so this call only flushes events to the cloud.
+      - name: Stop PMG proxy (flush events)
+        if: always()
+        run: pmg proxy stop
+
+  # ------------------------------------------------------------------
+  # Does PMG's presence break anything k6 actually does?
+  # This is the real regression guard for this repo.
+  # ------------------------------------------------------------------
+  ci-still-works:
+    name: PMG does not break the real Go build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Install Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.16.x
+
+      - name: Start PMG proxy
+        uses: safedep/pmg@5ac0f275b83d9d5a9342c6aae977ec32fa330daa # v1
+        with:
+          server-mode: true
+          api-key: ${{ secrets.PMG_PUBLIC_REPOS_TOKEN }}
+          tenant-id: ${{ secrets.PMG_TENANT_ID }}
+
+      # Mirrors the real `deps` job in all.yml.
+      - name: Go module verification still works
+        run: |
+          go version
+          go mod verify
+
+      - name: Go tool installs still work
+        run: |
+          go install github.com/alvaroloes/enumer@v1.1.2
+          go install github.com/mailru/easyjson/easyjson@v0.7.7
+
+      # This is why test-current-cov was left unguarded. If this passes, PMG is
+      # not corrupting checksum-verified downloads and that job can be guarded
+      # too.
+      - name: Checksum-verified download still works
+        run: |
+          set -x
+          curl -fsSLO "https://raw.githubusercontent.com/codecov/codecov-bash/${CODECOV_BASH_VERSION}/codecov"
+          echo "$CODECOV_BASH_SHA512SUM  codecov" | sha512sum -c -
+
+      # Full enforcement: any violation here is unexpected and should fail.
+      - name: Enforce PMG policy
+        if: always()
+        run: pmg proxy stop --fail-on-violation
+
+  # ------------------------------------------------------------------
+  # ONE-TIME QUESTION, manual dispatch only. Delete these two jobs once
+  # the placement question is settled.
+  #
+  # Compares PMG-before-setup-go (what the repo does today, per the
+  # SafeDep doc) against PMG-after-setup-go (the CLAUDE.md house rule).
+  # Run it twice before trusting a small gap - runner network varies.
+  # ------------------------------------------------------------------
+  placement-before:
+    name: 'placement: PMG BEFORE setup-go (current)'
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Start PMG proxy
+        uses: safedep/pmg@5ac0f275b83d9d5a9342c6aae977ec32fa330daa # v1
+        with:
+          server-mode: true
+          api-key: ${{ secrets.PMG_PUBLIC_REPOS_TOKEN }}
+          tenant-id: ${{ secrets.PMG_TENANT_ID }}
+
+      - name: Proxy state after PMG starts
+        run: |
+          echo "HTTP_PROXY=[${HTTP_PROXY:-unset}]  HTTPS_PROXY=[${HTTPS_PROXY:-unset}]"
+          if [ -z "${HTTP_PROXY:-}" ] && [ -z "${HTTPS_PROXY:-}" ]; then
+            echo "::warning title=No proxy env::PMG did not export HTTP(S)_PROXY - placement is irrelevant"
+          fi
+          echo "T0=$(date +%s)" >> "$GITHUB_ENV"
+
+      # Step under test: Go toolchain downloads WHILE the proxy is active.
+      - name: Install Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.16.x
+
+      - name: Report
+        run: |
+          SECS=$(( $(date +%s) - T0 ))
+          echo "::notice title=BEFORE - setup-go seconds::${SECS}"
+          echo "| PMG **before** setup-go | ${SECS}s |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Checksum-verified download through proxy
+        run: |
+          curl -fsSLO "https://raw.githubusercontent.com/codecov/codecov-bash/${CODECOV_BASH_VERSION}/codecov"
+          echo "$CODECOV_BASH_SHA512SUM  codecov" | sha512sum -c -
+
+      - name: Enforce PMG policy
+        if: always()
+        run: pmg proxy stop --fail-on-violation
+
+  placement-after:
+    name: 'placement: PMG AFTER setup-go (house rule)'
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Mark t0
+        run: echo "T0=$(date +%s)" >> "$GITHUB_ENV"
+
+      # Toolchain installed first, with no proxy in the path.
+      - name: Install Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.16.x
+
+      - name: Report
+        run: |
+          SECS=$(( $(date +%s) - T0 ))
+          echo "::notice title=AFTER - setup-go seconds::${SECS}"
+          echo "| PMG **after** setup-go | ${SECS}s |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Start PMG proxy
+        uses: safedep/pmg@5ac0f275b83d9d5a9342c6aae977ec32fa330daa # v1
+        with:
+          server-mode: true
+          api-key: ${{ secrets.PMG_PUBLIC_REPOS_TOKEN }}
+          tenant-id: ${{ secrets.PMG_TENANT_ID }}
+
+      - name: Checksum-verified download through proxy
+        run: |
+          curl -fsSLO "https://raw.githubusercontent.com/codecov/codecov-bash/${CODECOV_BASH_VERSION}/codecov"
+          echo "$CODECOV_BASH_SHA512SUM  codecov" | sha512sum -c -
+
+      - name: Enforce PMG policy
+        if: always()
+        run: pmg proxy stop --fail-on-violation
+
+  # ------------------------------------------------------------------
+  # Keep the coverage gap visible.
+  # ------------------------------------------------------------------
+  coverage-truth:
+    name: What PMG actually covers here
+    runs-on: ubuntu-latest
+    needs: [guard-works, ci-still-works]
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - name: Write coverage statement to run summary
+        run: |
+          {
+            echo "## What this green check does and does not mean"
+            echo
+            echo "PMG is **running** in k6's CI. PMG is **not screening k6's dependencies.**"
+            echo
+            echo "| Install surface | Where | Screened by PMG? |"
+            echo "|---|---|---|"
+            echo "| \`go get\` / \`go install\` / \`go mod\` | all.yml, xk6.yml, tc39.yml, arm-tests.yml | No - Go is not a supported ecosystem |"
+            echo "| \`apt-get install\` | all.yml build job | No - not supported |"
+            echo "| Chocolatey / wix | all.yml package-windows | No - not supported, and PMG is Linux-only |"
+            echo "| \`pip3 install s3cmd\` | packaging/Dockerfile:11 | No - runs inside \`docker build\`, invisible to the proxy |"
+            echo "| \`go get\` in Dockerfile | Dockerfile:6-9 | No - same reason |"
+            echo
+            echo "**Supported ecosystems:** npm, pnpm, yarn, bun, npx, pnpx, pip, uv, poetry."
+            echo "k6 uses none of them on the runner."
+            echo
+            echo "This workflow verifies that PMG still *functions* and that it does not"
+            echo "*break* k6's build. Neither is a claim of coverage."
+            echo
+            echo "If k6 ever adds a JS or Python toolchain to CI, PMG will start covering"
+            echo "it automatically and this table should be revisited."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail if either core job failed
+        if: needs.guard-works.result != 'success' || needs.ci-still-works.result != 'success'
+        run: |
+          echo "::error title=PMG self-test failed::guard-works=${{ needs.guard-works.result }} ci-still-works=${{ needs.ci-still-works.result }}"
+          exit 1

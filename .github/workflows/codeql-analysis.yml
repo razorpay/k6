@@ -8,10 +8,20 @@ jobs:
   analyze:
     name: Analyze
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
 
     steps:
     - name: Checkout repo
       uses: actions/checkout@v2
+
+    - name: Start PMG proxy
+      uses: safedep/pmg@5ac0f275b83d9d5a9342c6aae977ec32fa330daa # v1
+      with:
+        server-mode: true
+        api-key: ${{ secrets.PMG_PUBLIC_REPOS_TOKEN }}
+        tenant-id: ${{ secrets.PMG_TENANT_ID }}
 
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v1
@@ -20,3 +30,7 @@ jobs:
 
     - name: CodeQL Analysis
       uses: github/codeql-action/analyze@v1
+
+    - name: Enforce PMG policy
+      if: always()
+      run: pmg proxy stop --fail-on-violation

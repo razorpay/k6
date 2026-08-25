@@ -18,9 +18,17 @@ jobs:
         go: [stable, tip]
         platform: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
+      - name: Start PMG proxy
+        uses: safedep/pmg@5ac0f275b83d9d5a9342c6aae977ec32fa330daa # v1
+        with:
+          server-mode: true
+          api-key: ${{ secrets.PMG_PUBLIC_REPOS_TOKEN }}
+          tenant-id: ${{ secrets.PMG_TENANT_ID }}
       - name: Install Go
         uses: actions/setup-go@v2
         with:
@@ -73,3 +81,6 @@ jobs:
             echo "summary result was not as expected: $SUMMARY_RESULT"
             exit 12
           fi
+      - name: Enforce PMG policy
+        if: always()
+        run: pmg proxy stop --fail-on-violation
