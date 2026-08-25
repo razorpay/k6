@@ -105,6 +105,7 @@ jobs:
         uses: actions/checkout@v2
       - name: Setup PMG proxy
         id: pmg-setup
+        if: runner.os == 'Linux'
         uses: safedep/pmg@v1
         with:
           server-mode: true
@@ -128,7 +129,7 @@ jobs:
           fi
           go test "${args[@]}" -timeout 800s ./...
       - name: Enforce PMG policy
-        if: always()
+        if: always() && runner.os == 'Linux'
         run: |
           if [ "${{ steps.pmg-setup.outcome }}" = "success" ]; then
             pmg proxy stop --fail-on-violation
@@ -190,6 +191,7 @@ jobs:
         uses: actions/checkout@v2
       - name: Setup PMG proxy
         id: pmg-setup
+        if: runner.os == 'Linux'
         uses: safedep/pmg@v1
         with:
           server-mode: true
@@ -239,7 +241,7 @@ jobs:
           name: test-coverage-report-${{ matrix.platform }}
           path: coverage.html
       - name: Enforce PMG policy
-        if: always()
+        if: always() && runner.os == 'Linux'
         run: |
           if [ "${{ steps.pmg-setup.outcome }}" = "success" ]; then
             pmg proxy stop --fail-on-violation
